@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"strings"
 	"sync"
 	"testing"
 	"testing/iotest"
+	"time"
 
 	"github.com/klauspost/readahead"
 )
@@ -798,4 +800,55 @@ func Example() {
 
 	fmt.Println(dst.String())
 	// Output: Example data
+}
+
+// readStartedConn signals when the background reader enters a blocking read.
+type readStartedConn struct {
+	net.Conn
+	started chan struct{}
+	once    sync.Once
+}
+
+func (c *readStartedConn) Read(p []byte) (int, error) {
+	c.once.Do(func() { close(c.started) })
+	return c.Conn.Read(p)
+}
+
+func TestReadCloserCloseUnblocksRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		new  func(io.ReadCloser) (io.ReadCloser, error)
+	}{
+		{"size", func(c io.ReadCloser) (io.ReadCloser, error) {
+			return readahead.NewReadCloserSize(c, 2, 8)
+		}},
+		{"buffers", func(c io.ReadCloser) (io.ReadCloser, error) {
+			return readahead.NewReadCloserBuffer(c, makeBuffers(2, 8))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, peer := net.Pipe()
+			defer conn.Close()
+			defer peer.Close()
+			input := &readStartedConn{Conn: conn, started: make(chan struct{})}
+			r, err := tc.new(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-input.started
+			closed := make(chan error, 1)
+			go func() { closed <- r.Close() }()
+			select {
+			case err := <-closed:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				// Release the blocked read even when the regression fails.
+				conn.Close()
+				<-closed
+				t.Fatal("Close did not unblock the underlying read")
+			}
+		})
+	}
 }

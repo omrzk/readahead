@@ -454,19 +454,21 @@ func (a *reader) WriteTo(w io.Writer) (n int64, err error) {
 // Close will ensure that the underlying async reader is shut down.
 // It will also close the input supplied on newAsyncReader.
 func (a *reader) Close() (err error) {
+	if a.closer != nil {
+		// Close the input before waiting, so an in-progress Read can unblock.
+		// Only call once.
+		c := a.closer
+		a.closer = nil
+		err = c.Close()
+	}
+
 	select {
 	case <-a.exited:
 	case a.exit <- struct{}{}:
 		<-a.exited
 	}
-	if a.closer != nil {
-		// Only call once
-		c := a.closer
-		a.closer = nil
-		return c.Close()
-	}
 	a.err = errors.New("readahead: read after Close")
-	return nil
+	return err
 }
 
 // Internal buffer representing a single read.
