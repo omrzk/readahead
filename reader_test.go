@@ -852,3 +852,73 @@ func TestReadCloserCloseUnblocksRead(t *testing.T) {
 		})
 	}
 }
+
+func TestReadCloserClosePreservesReadError(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		new  func(io.ReadCloser) (io.ReadCloser, error)
+	}{
+		{"size", func(c io.ReadCloser) (io.ReadCloser, error) {
+			return readahead.NewReadCloserSize(c, 2, 8)
+		}},
+		{"buffers", func(c io.ReadCloser) (io.ReadCloser, error) {
+			return readahead.NewReadCloserBuffer(c, makeBuffers(2, 8))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := tc.new(ioutil.NopCloser(bytes.NewReader(nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Read(make([]byte, 1)); err != io.EOF {
+				t.Fatalf("Read before Close: got %v, want EOF", err)
+			}
+			if err := r.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.Read(make([]byte, 1)); err != io.EOF {
+				t.Fatalf("Read after Close: got %v, want EOF", err)
+			}
+		})
+	}
+}
+
+func TestReadCloserCloseWithForegroundRead(t *testing.T) {
+	for _, writeTo := range []bool{false, true} {
+		t.Run(fmt.Sprint("WriteTo=", writeTo), func(t *testing.T) {
+			conn, peer := net.Pipe()
+			defer conn.Close()
+			defer peer.Close()
+			input := &readStartedConn{Conn: conn, started: make(chan struct{})}
+			r, err := readahead.NewReadCloserSize(input, 2, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-input.started
+			started := make(chan struct{})
+			result := make(chan error, 1)
+			go func() {
+				close(started)
+				var err error
+				if writeTo {
+					_, err = r.(io.WriterTo).WriteTo(ioutil.Discard)
+				} else {
+					_, err = r.Read(make([]byte, 1))
+				}
+				result <- err
+			}()
+			<-started
+			if err := r.Close(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-result:
+				if err != io.ErrClosedPipe {
+					t.Fatalf("foreground operation: got %v, want %v", err, io.ErrClosedPipe)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("foreground operation did not unblock")
+			}
+		})
+	}
+}
