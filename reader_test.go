@@ -866,18 +866,33 @@ func TestReadCloserClosePreservesReadError(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := tc.new(ioutil.NopCloser(bytes.NewReader(nil)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := r.Read(make([]byte, 1)); err != io.EOF {
-				t.Fatalf("Read before Close: got %v, want EOF", err)
-			}
-			if err := r.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := r.Read(make([]byte, 1)); err != io.EOF {
-				t.Fatalf("Read after Close: got %v, want EOF", err)
+			for _, readErr := range []error{io.EOF, errors.New("input read error")} {
+				t.Run(readErr.Error(), func(t *testing.T) {
+					input := &testCloser{Reader: dummyReader{readFN: func([]byte) (int, error) {
+						return 0, readErr
+					}}}
+					r, err := tc.new(input)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err := r.Read(make([]byte, 1)); err != readErr {
+						t.Fatalf("Read before Close: got %v, want %v", err, readErr)
+					}
+					for i := 1; i <= 3; i++ {
+						if err := r.Close(); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := r.Read(make([]byte, 1)); err != readErr {
+							t.Fatalf("Read after Close %d: got %v, want %v", i, err, readErr)
+						}
+						if _, err := r.(io.WriterTo).WriteTo(ioutil.Discard); err != readErr {
+							t.Fatalf("WriteTo after Close %d: got %v, want %v", i, err, readErr)
+						}
+						if input.closed != 1 {
+							t.Fatalf("Close %d: underlying close count got %d, want 1", i, input.closed)
+						}
+					}
+				})
 			}
 		})
 	}
@@ -908,8 +923,10 @@ func TestReadCloserCloseWithForegroundRead(t *testing.T) {
 				result <- err
 			}()
 			<-started
-			if err := r.Close(); err != nil {
-				t.Fatal(err)
+			for i := 0; i < 3; i++ {
+				if err := r.Close(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			select {
 			case err := <-result:

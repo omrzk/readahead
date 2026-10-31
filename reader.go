@@ -47,6 +47,8 @@ type reader struct {
 	cur     *buffer       // Current buffer being served
 	exited  chan struct{} // Channel is closed been the async reader shuts down
 	bufs    [][]byte
+
+	closerClosed bool // Whether the closer has been closed
 }
 
 // NewReader returns a reader that will asynchronously read from
@@ -455,10 +457,10 @@ func (a *reader) WriteTo(w io.Writer) (n int64, err error) {
 // It will also close the input supplied on newAsyncReader.
 func (a *reader) Close() (err error) {
 	c := a.closer
-	if c != nil {
+	if c != nil && !a.closerClosed {
 		// Close the input before waiting, so an in-progress Read can unblock.
-		// Only call once.
-		a.closer = nil
+		// Only call once, retaining the closer to distinguish it from plain readers.
+		a.closerClosed = true
 		err = c.Close()
 	}
 
